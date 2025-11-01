@@ -1,6 +1,7 @@
 % =========================================================
 IoD-ECC-PBFT
 Schnorr-style ECC signatures
+RD<->GSS + SK  
 % =========================================================
 
 %%%%%% Control_room (RD) %%%%%%
@@ -205,3 +206,4 @@ goal
 end goal
 
 environment()
+
