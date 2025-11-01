@@ -1,6 +1,6 @@
 % =========================================================
 % IoD blockchain-based auth
-% RD<->RD mutual auth + RD<->GSS + no SK leakage
+% RD<->RD mutual auth
 % =========================================================
 %%%%% control_room %%%%%
 role control_room(CR, RD1, RD2, GSS, CS: agent,
