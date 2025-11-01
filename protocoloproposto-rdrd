@@ -1,0 +1,268 @@
+% =========================================================
+% IoD blockchain-based auth
+% RD<->RD mutual auth + RD<->GSS + no SK leakage
+% =========================================================
+%%%%% control_room %%%%%
+role control_room(CR, RD1, RD2, GSS, CS: agent,
+                  SecureChannel: symmetric_key,
+                  h1, h2, h3, h4: hash_func,
+                  SND, RCV: channel(dy))
+played_by CR
+def=
+local State: nat,
+      s_CR: text,
+      % RD1
+      s_RD1, Pub_RD1, TID_RD1, TC_RD1: text,
+      % RD2
+      s_RD2, Pub_RD2, TID_RD2, TC_RD2: text,
+      % GSS
+      s_GSS, Pub_GSS, TID_GSS, TC_GSS: text,
+      % CS
+      s_CS, Pub_CS, TID_CS, TC_CS: text
+init
+  State := 0
+transition
+
+  % --- system start
+  1. State = 0 /\ RCV(start) =|>
+     State' := 1
+     /\ s_CR' := new()
+     /\ SND({h1, h2, h3, h4}_SecureChannel)
+
+  % --- RD1 registration
+  2. State = 1 /\ RCV({ID_RD1}_SecureChannel) =|>
+     State' := 2
+     /\ s_RD1'  := new()
+     /\ Pub_RD1' := h1(s_RD1')
+     /\ TID_RD1' := h2(ID_RD1.Pub_RD1')
+     /\ TC_RD1'  := h3(TID_RD1'.s_RD1'.s_CR')
+     /\ SND({TID_RD1', TC_RD1', Pub_RD1', s_RD1'}_SecureChannel)
+
+  % --- RD2 registration
+  3. State = 2 /\ RCV({ID_RD2}_SecureChannel) =|>
+     State' := 3
+     /\ s_RD2'  := new()
+     /\ Pub_RD2' := h1(s_RD2')
+     /\ TID_RD2' := h2(ID_RD2.Pub_RD2')
+     /\ TC_RD2'  := h3(TID_RD2'.s_RD2'.s_CR')
+     /\ SND({TID_RD2', TC_RD2', Pub_RD2', s_RD2'}_SecureChannel)
+
+  % --- GSS registration
+  4. State = 3 /\ RCV({ID_GSS}_SecureChannel) =|>
+     State' := 4
+     /\ s_GSS'  := new()
+     /\ Pub_GSS' := h1(s_GSS')
+     /\ TID_GSS' := h2(ID_GSS.Pub_GSS')
+     /\ TC_GSS'  := h3(TID_GSS'.s_GSS'.s_CR')
+     /\ SND({TID_GSS', TC_GSS', Pub_GSS', s_GSS'}_SecureChannel)
+
+  % --- CS registration (abstraído)
+  5. State = 4 /\ RCV({ID_CS}_SecureChannel) =|>
+     State' := 5
+     /\ s_CS'  := new()
+     /\ Pub_CS' := h1(s_CS')
+     /\ TID_CS' := h2(ID_CS.Pub_CS')
+     /\ TC_CS'  := h3(TID_CS'.s_CS'.s_CR')
+     /\ SND({TID_CS', TC_CS', Pub_CS', s_CS'}_SecureChannel)
+
+end role
+
+% =========================================================
+%%%%% RD1: initiator of RD1<->RD2 %%%%%
+
+role remote_drone_initiator(RD1, CR, RD2, GSS: agent,
+                            SecureChannel: symmetric_key,
+                            h1, h2, h3, h4: hash_func,
+                            SND, RCV: channel(dy))
+played_by RD1
+def=
+local State: nat,
+      ID_RD1, TID_RD1, TC_RD1, Pub_RD1, s_RD1: text,
+      % for RD<->RD
+      t1, d1: text,
+      x_RD1, X_RD1, Sig_RD1: text,
+      Enc_RD2: text,
+      % for RD<->GSS (reuso)
+      SessKey_RD_GSS: text,
+      % SK with RD2
+      SK_RD1_2: text
+init
+  State := 0
+transition
+
+  % --- get system params
+  1. State = 0 /\ RCV(start) =|>
+     State' := 1
+     /\ ID_RD1' := new()
+     /\ SND({ID_RD1'}_SecureChannel)
+
+  % --- receive reg data
+  2. State = 1 /\ RCV({TID_RD1, TC_RD1, Pub_RD1, s_RD1}_SecureChannel) =|>
+     State' := 2
+     % pode agora iniciar RD<->RD
+     /\ t1' := new()
+     /\ d1' := new()
+     /\ x_RD1' := h1(TID_RD1.TC_RD1.s_RD1.t1'.d1')
+     /\ X_RD1' := h2(x_RD1')          % abstr. de x*P
+     /\ Sig_RD1' := h3(TID_RD1.Pub_RD1.t1'.d1'.s_RD1)
+     /\ Enc_RD2' := {TID_RD1, X_RD1', Pub_RD1, Sig_RD1', t1'}_Pub_RD2
+     /\ SND(RD1, RD2, Enc_RD2')
+
+  % --- receive M2 from RD2
+  3. State = 2 /\ RCV(RD2, {TID_RD2, Y_RD2, Sig_RD2, Pub_RD2, t2}_Pub_RD1) =|>
+     State' := 3
+     % derive SK with RD2
+     /\ SK_RD1_2' := h4(TID_RD1.TID_RD2.X_RD1.Y_RD2.t1.t2)
+     % send key confirmation encrypted with RD2's public key
+     /\ SND(RD1, RD2, {h4(SK_RD1_2')}_Pub_RD2)
+
+  % --- also accept SK from GSS (optional, for consistency with paper)
+  4. State = 3 /\ RCV(GSS, {SessKey_RD_GSS', Sig_RD_GSS'}_SecureChannel) =|>
+     State' := 4
+     /\ SessKey_RD_GSS' := SessKey_RD_GSS'
+     /\ SND(RD1, GSS, {h4(SessKey_RD_GSS')}_(SessKey_RD_GSS'))
+
+end role
+
+% =========================================================
+%%%%% RD2: responder of RD<->RD %%%%%
+
+role remote_drone_responder(RD2, CR, RD1: agent,
+                            SecureChannel: symmetric_key,
+                            h1, h2, h3, h4: hash_func,
+                            SND, RCV: channel(dy))
+played_by RD2
+def=
+local State: nat,
+      ID_RD2, TID_RD2, TC_RD2, Pub_RD2, s_RD2: text,
+      % received from RD1
+      TID_RD1, X_RD1, Pub_RD1, Sig_RD1, t1: text,
+      % own
+      t2, d2: text,
+      y_RD2, Y_RD2, Sig_RD2: text,
+      SK_RD2_1: text
+init
+  State := 0
+transition
+
+  % --- get system params
+  1. State = 0 /\ RCV(start) =|>
+     State' := 1
+     /\ ID_RD2' := new()
+     /\ SND({ID_RD2'}_SecureChannel)
+
+  % --- receive reg data
+  2. State = 1 /\ RCV({TID_RD2, TC_RD2, Pub_RD2, s_RD2}_SecureChannel) =|>
+     State' := 2
+
+  % --- receive M1 from RD1 (encrypted)
+  3. State = 2 /\ RCV(RD1, {TID_RD1, X_RD1, Pub_RD1, Sig_RD1, t1}_Pub_RD2) =|>
+     State' := 3
+     % verify Schnorr-style signature from RD1
+     /\ if (Sig_RD1 = h3(TID_RD1.Pub_RD1.t1.s_RD2)) then
+          t2' := new()
+          /\ d2' := new()
+          /\ y_RD2' := h1(TID_RD2.TC_RD2.s_RD2.t2'.d2')
+          /\ Y_RD2' := h2(y_RD2')
+          /\ SK_RD2_1' := h4(TID_RD2.TID_RD1.X_RD1.Y_RD2'.t1.t2')
+          /\ Sig_RD2' := h3(TID_RD2.Pub_RD2.t2'.SK_RD2_1'.s_RD2)
+          /\ SND(RD2, RD1, {TID_RD2, Y_RD2', Sig_RD2', Pub_RD2, t2'}_Pub_RD1)
+        else
+          SND(RD2, RD1, error)
+        end if
+
+  % --- receive key confirmation (encrypted with Pub_RD2)
+  4. State = 3 /\ RCV(RD1, {h4(SK_RD2_1)}_Pub_RD2) =|>
+     State' := 4
+     /\ witness(RD2, RD1, rd1_rd2_auth, SK_RD2_1)
+
+end role
+
+% =========================================================
+%%%%% Ground station %%%%%
+
+role ground_station(GSS, CR, RD1, CS: agent,
+                    SecureChannel: symmetric_key,
+                    h1, h2, h3, h4: hash_func,
+                    SND, RCV: channel(dy))
+played_by GSS
+def=
+local State: nat,
+      ID_GSS, TID_GSS, TC_GSS, Pub_GSS, s_GSS: text,
+      SessKey: text
+init
+  State := 0
+transition
+
+  1. State = 0 /\ RCV({start}) =|>
+     State' := 1
+     /\ ID_GSS' := new()
+     /\ SND({ID_GSS'}_SecureChannel)
+
+  2. State = 1 /\ RCV({TID_GSS, TC_GSS, Pub_GSS, s_GSS}_SecureChannel) =|>
+     State' := 2
+     % for simplicity: GSS just sends a session key to RD1
+     /\ SessKey' := h1(TID_GSS.s_GSS)
+     /\ SND(GSS, RD1, {SessKey', h2(SessKey'.TID_GSS)}_SecureChannel)
+
+  3. State = 2 /\ RCV(RD1, {h4(SessKey)}_SessKey) =|>
+     State' := 3
+     /\ witness(GSS, RD1, gss_rd1_auth, SessKey)
+
+end role
+
+% =========================================================
+%%%%% Cloud server %%%%%
+
+role cloud_server(CS, GSS: agent,
+                  SecureChannel: symmetric_key,
+                  h1, h2, h3, h4: hash_func,
+                  SND, RCV: channel(dy))
+played_by CS
+def=
+local State: nat
+init
+  State := 0
+transition
+  1. State = 0 /\ RCV(start) =|>
+     State' := 1
+end role
+
+% =========================================================
+%%%%% Session: compõe todos %%%%%
+
+role session()
+def=
+local CR, RD1, RD2, GSS, CS: agent,
+      SecureChannel: symmetric_key,
+      h1, h2, h3, h4: hash_func
+composition
+  control_room(CR, RD1, RD2, GSS, CS, SecureChannel, h1, h2, h3, h4)
+  /\ remote_drone_initiator(RD1, CR, RD2, GSS, SecureChannel, h1, h2, h3, h4)
+  /\ remote_drone_responder(RD2, CR, RD1, SecureChannel, h1, h2, h3, h4)
+  /\ ground_station(GSS, CR, RD1, CS, SecureChannel, h1, h2, h3, h4)
+  /\ cloud_server(CS, GSS, SecureChannel, h1, h2, h3, h4)
+end role
+
+% =========================================================
+%%%%% Environment + goals %%%%%
+
+role environment()
+def=
+const CR, RD1, RD2, GSS, CS: agent,
+      SecureChannel: symmetric_key,
+      h1, h2, h3, h4: hash_func
+composition
+  session()
+end role
+%%%%% Autenticao e chave de sessao %%%%%
+goal
+  % sigilo da chave RD<->GSS
+  secrecy_of SessKey
+  % autenticação GSS <-> RD1
+  authentication_on gss_rd1_auth
+  % autenticação RD1 <-> RD2 (drone-to-drone)
+  authentication_on rd1_rd2_auth
+end goal
+
+environment()
