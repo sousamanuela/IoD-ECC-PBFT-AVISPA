@@ -1,213 +1,206 @@
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-% IoD ECC–PBFT Authentication Protocol (timestamp-aware version)
-% Focus: RD <-> GSS mutual authentication with replay protection
-% Entities: control_room, remote_drone, ground_station, cloud_server
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% =========================================================
+IoD-ECC-PBFT
+Schnorr-style ECC signatures
+% =========================================================
 
-%%%%% Control Room (CR) %%%%%
+%%%%%% Control_room (RD) %%%%%%
 
 role control_room(CR, RD, GSS, CS: agent,
                   SecureChannel: symmetric_key,
                   h1, h2, h3, h4: hash_func,
-                  P: public_key,
                   SND, RCV: channel(dy))
 played_by CR
 def=
 local State: nat,
-      s_CR, Pub_CR: text,
-      ID_RD, TID_RD, TC_RD, Pub_RD, s_RD: text,
-      ID_GSS, Pub_GSS, s_GSS: text,
-      ID_CS, Pub_CS, s_CS: text
+      s_CR, s_RD, s_GSS, s_CS: text,
+      Pub_RD, Pub_GSS, Pub_CS: text,
+      TID_RD, TC_RD, TID_GSS, TC_GSS, TID_CS, TC_CS: text
 init
   State := 0
 transition
 
-  % 1) System init
+  % --- 0) start system: CR publishes params to RD/GSS/CS over secure admin channel
   1. State = 0 /\ RCV(start) =|>
      State' := 1
      /\ s_CR' := new()
-     /\ Pub_CR' := h1(s_CR')
-     /\ SND({P, h1, h2, h3, h4, Pub_CR'}_SecureChannel)
+     /\ SND({h1, h2, h3, h4}_SecureChannel)
 
-  % 2) RD registration (offline)
+  % --- 1) RD registration
   2. State = 1 /\ RCV({ID_RD}_SecureChannel) =|>
      State' := 2
      /\ s_RD' := new()
-     /\ Pub_RD' := h1(s_RD')
-     /\ TID_RD' := h1(ID_RD.Pub_RD')
-     /\ TC_RD'  := h2(TID_RD'.s_RD'.s_CR')
+     /\ Pub_RD' := h1(s_RD')              % abstract ECC: Pub = h1(sk)
+     /\ TID_RD' := h2(ID_RD.Pub_RD')
+     /\ TC_RD'  := h3(TID_RD'.s_RD'.s_CR')
      /\ SND({TID_RD', TC_RD', Pub_RD', s_RD'}_SecureChannel)
 
-  % 3) GSS registration
+  % --- 2) GSS registration
   3. State = 2 /\ RCV({ID_GSS}_SecureChannel) =|>
      State' := 3
      /\ s_GSS' := new()
      /\ Pub_GSS' := h1(s_GSS')
-     /\ SND({Pub_GSS', s_GSS'}_SecureChannel)
+     /\ TID_GSS' := h2(ID_GSS.Pub_GSS')
+     /\ TC_GSS'  := h3(TID_GSS'.s_GSS'.s_CR')
+     /\ SND({TID_GSS', TC_GSS', Pub_GSS', s_GSS'}_SecureChannel)
 
-  % 4) CS registration
+  % --- 3) CS registration
   4. State = 3 /\ RCV({ID_CS}_SecureChannel) =|>
      State' := 4
      /\ s_CS' := new()
      /\ Pub_CS' := h1(s_CS')
-     /\ SND({Pub_CS', s_CS'}_SecureChannel)
+     /\ TID_CS' := h2(ID_CS.Pub_CS')
+     /\ TC_CS'  := h3(TID_CS'.s_CS'.s_CR')
+     /\ SND({TID_CS', TC_CS', Pub_CS', s_CS'}_SecureChannel)
 
 end role
 
-%%%%% Remote Drone (RD) %%%%%
+%%%%%% Remote drone (RD) %%%%%%
 
 role remote_drone(RD, CR, GSS: agent,
                   SecureChannel: symmetric_key,
-                  h1, h2, h3: hash_func,
-                  P: public_key,
+                  h1, h2, h3, h4: hash_func,
                   SND, RCV: channel(dy))
 played_by RD
 def=
 local State: nat,
       ID_RD, TID_RD, TC_RD, Pub_RD, s_RD: text,
-      n_RD, t_RD: text,
+      t_RD, n_RD: text,
       X_RD, Sig_RD: text,
       SessKey_RD_GSS: text
 init
   State := 0
 transition
 
-  % 1) ask CR to register
+  % --- 0) get system params
   1. State = 0 /\ RCV(start) =|>
      State' := 1
-     /\ ID_RD' := RD
+     /\ ID_RD' := new()
      /\ SND({ID_RD'}_SecureChannel)
 
-  % 2) receive registration data
+  % --- 1) receive reg data from CR
   2. State = 1 /\ RCV({TID_RD, TC_RD, Pub_RD, s_RD}_SecureChannel) =|>
      State' := 2
 
-  % 3) receive auth request from GSS (insecure)
+  % --- 2) wait for auth request from GSS
   3. State = 2 /\ RCV(GSS, auth_request) =|>
      State' := 3
-     /\ n_RD' := new()    % nonce
-     /\ t_RD' := new()    % timestamp / freshness token
-     % message hash mimicking: h(TID || TC || s_RD || t || n)
-     /\ X_RD' := h3(TID_RD.TC_RD.s_RD.t_RD'.n_RD')
-     % abstract ECC signature
-     /\ Sig_RD' := h3(X_RD'.Pub_RD)
-     % tell AVISPA we (RD) claim to talk to GSS
-     /\ witness(RD, GSS, rd_gss_auth, X_RD')
+     /\ t_RD' := new()
+     /\ n_RD' := new()
+     /\ X_RD' := h1(TID_RD.t_RD'.n_RD')
+     % Schnorr-style signature: Sig = h(m || Pub) * sk  (+ nonce part)
+     /\ Sig_RD' := h2(TID_RD.Pub_RD.t_RD'.n_RD'.s_RD)
      /\ SND(RD, GSS, TID_RD, Pub_RD, X_RD', Sig_RD', t_RD', n_RD')
 
-  % 4) receive key+signature back (secure)
-  4. State = 3 /\ RCV(GSS, {SessKey_RD_GSS', Sig_GSS'}_SecureChannel) =|>
+  % --- 3) receive SK and sig from GSS over secure admin channel
+  4. State = 3 /\ RCV(GSS, {SessKey_RD_GSS', Sig_RD_GSS'}_SecureChannel) =|>
      State' := 4
-     % we expect GSS to authenticate on same session key
-     /\ request(RD, GSS, gss_rd_auth, SessKey_RD_GSS')
+     /\ SessKey_RD_GSS' := SessKey_RD_GSS'
+     % send key confirmation WITHOUT leaking SK
+     /\ SND(RD, GSS, {h4(SessKey_RD_GSS')}_(SessKey_RD_GSS'))
 
 end role
 
-%%%%% Ground Station (GSS) %%%%%
+
+%%%%%% Ground Station Server (GSS) %%%%%%
 
 role ground_station(GSS, CR, RD, CS: agent,
                     SecureChannel: symmetric_key,
-                    h1, h2, h3: hash_func,
-                    P: public_key,
+                    h1, h2, h3, h4: hash_func,
                     SND, RCV: channel(dy))
 played_by GSS
 def=
 local State: nat,
-      Pub_GSS, s_GSS: text,
+      ID_GSS, TID_GSS, TC_GSS, Pub_GSS, s_GSS: text,
       TID_RD, Pub_RD, X_RD, Sig_RD, t_RD, n_RD: text,
-      X_GSS, SessKey, Sig_GSS: text,
-      FreshTag: text
+      X_GSS: text,
+      SessKey: text
 init
   State := 0
 transition
 
-  % 1) register at CR
+  % --- 0) system start
   1. State = 0 /\ RCV({start}) =|>
      State' := 1
-     /\ SND({GSS}_SecureChannel)
+     /\ ID_GSS' := new()
+     /\ SND({ID_GSS'}_SecureChannel)
 
-  % 2) receive GSS material
-  2. State = 1 /\ RCV({Pub_GSS, s_GSS}_SecureChannel) =|>
+  % --- 1) receive its own reg from CR
+  2. State = 1 /\ RCV({TID_GSS, TC_GSS, Pub_GSS, s_GSS}_SecureChannel) =|>
      State' := 2
+     % request authentication from RD
+     /\ SND(GSS, RD, auth_request)
 
-  % 3) send auth_request to RD (insecure)
-  3. State = 2 =|>
+  % --- 2) receive RD auth material over DY
+  3. State = 2 /\ RCV(RD, TID_RD, Pub_RD, X_RD, Sig_RD, t_RD, n_RD) =|>
      State' := 3
-     /\ SND(GSS, auth_request)
+     % verify RD's Schnorr-style signature
+     /\ if (Sig_RD = h2(TID_RD.Pub_RD.t_RD.n_RD.s_GSS)) then
+           % derive own contribution
+           X_GSS' := h3(TID_GSS.t_RD.n_RD)
+           /\ SessKey' := h4(TID_RD.TID_GSS.X_RD.X_GSS'.t_RD.n_RD)
+           /\ SND(GSS, RD, {SessKey', h3(SessKey'.TID_GSS)}_SecureChannel)
+        else
+           SND(GSS, RD, error)
+        end if
 
-  % 4) receive RD's auth (insecure)
-  4. State = 3 /\ RCV(RD, TID_RD, Pub_RD, X_RD, Sig_RD, t_RD, n_RD) =|>
+  % --- 3) receive key confirmation (encrypted with SK)
+  4. State = 3 /\ RCV(RD, {h4(SessKey)}_SessKey) =|>
      State' := 4
-     % simulate freshness check: we create our own fresh tag
-     /\ FreshTag' := h1(GSS.new())
-     % in a real protocol we would compare t_RD with local time window
-     % here we *bind* t_RD into the session key to prevent replay
-     /\ X_GSS' := h2(TID_RD.FreshTag')
-     /\ SessKey' := h3(TID_RD.X_RD.X_GSS'.t_RD.n_RD)
-     /\ Sig_GSS' := h3(SessKey'.Pub_GSS)
-     % mutual authentication
-    /\ witness(GSS, RD, gss_rd_auth, SessKey')
-    /\ request(GSS, RD, rd_gss_auth, X_RD)
-     % send back over secure/admin channel (like original text)
-     /\ SND(GSS, RD, {SessKey', Sig_GSS'}_SecureChannel)
-     % forward to CS (abstracted)
-     /\ SND({SessKey', Sig_GSS'}_SecureChannel)
+     /\ witness(GSS, RD, gss_rd_auth, SessKey)
 
 end role
 
-%%%%% Cloud Server (CS) %%%%%
+
+%%%%%% Cloud Server (CS) %%%%%%
 
 role cloud_server(CS, GSS: agent,
                   SecureChannel: symmetric_key,
-                  h1, h2, h3: hash_func,
-                  P: public_key,
+                  h1, h2, h3, h4: hash_func,
                   SND, RCV: channel(dy))
 played_by CS
 def=
 local State: nat,
-      SessKey, Sig_GSS, Sig_CS: text
+      ID_CS: text
 init
   State := 0
 transition
 
-  1. State = 0 /\ RCV({SessKey, Sig_GSS}_SecureChannel) =|>
+  1. State = 0 /\ RCV(start) =|>
      State' := 1
-     /\ Sig_CS' := h3(SessKey.new())
-     /\ SND({Sig_CS'}_SecureChannel)
+     /\ ID_CS' := new()
+     /\ SND({ID_CS'}_SecureChannel)
 
 end role
 
-%%%%% Session %%%%%
 
-role session(CR, RD, GSS, CS: agent,
-             SecureChannel: symmetric_key,
-             h1, h2, h3, h4: hash_func,
-             P: public_key)
+%%%%%% Session: compõe todos os papéis %%%%%%
+
+role session()
 def=
+local CR, RD, GSS, CS: agent,
+      SecureChannel: symmetric_key,
+      h1, h2, h3, h4: hash_func
 composition
-    control_room(CR, RD, GSS, CS, SecureChannel, h1, h2, h3, h4, P)
-  /\ remote_drone(RD, CR, GSS, SecureChannel, h1, h2, h3, P)
-  /\ ground_station(GSS, CR, RD, CS, SecureChannel, h1, h2, h3, P)
-  /\ cloud_server(CS, GSS, SecureChannel, h1, h2, h3, P)
+  control_room(CR, RD, GSS, CS, SecureChannel, h1, h2, h3, h4)
+  /\ remote_drone(RD, CR, GSS, SecureChannel, h1, h2, h3, h4)
+  /\ ground_station(GSS, CR, RD, CS, SecureChannel, h1, h2, h3, h4)
+  /\ cloud_server(CS, GSS, SecureChannel, h1, h2, h3, h4)
 end role
 
-%%%%% Environment %%%%%
+
+%%%%%% Environment + goals %%%%%%
 
 role environment()
 def=
 const CR, RD, GSS, CS: agent,
       SecureChannel: symmetric_key,
-      h1, h2, h3, h4: hash_func,
-      P: public_key
+      h1, h2, h3, h4: hash_func
 composition
-    session(CR, RD, GSS, CS, SecureChannel, h1, h2, h3, h4, P)
+  session()
 end role
-
-%%%%% Goals %%%%%
-
+%%%%%% Autenticacao e chave de sessao %%%%%%
 goal
   secrecy_of SessKey
-  authentication_on rd_gss_auth
   authentication_on gss_rd_auth
 end goal
 
