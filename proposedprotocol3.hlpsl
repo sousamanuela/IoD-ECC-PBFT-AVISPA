@@ -28,22 +28,30 @@ transition
      State' := 1
      /\ s_CR' := new()
      /\ SND({h1, h2, h3, h4}_SecureChannel)
-
-% --- 2) RD registration
+%%%% RD registration
  2. State = 1 /\ RCV({TID_RD, RTS_RD}_SecureChannel) =|>
      State'   := 2
      /\ TID_RD' := TID_RD
      /\ RTS_RD' := RTS_RD
 
-  % --- 2) GSS registration
-    4. State = 3 /\ RCV({ID_CS, Pub_CS}_SecureChannel) =|>
+%%%% GSS registration
+  3. State = 2 /\ RCV({ID_GSS, Pub_GSS}_SecureChannel) =|>
+     State'     := 3
+     /\ Pub_GSS' := Pub_GSS
+     /\ TID_GSS' := h2(ID_GSS.Pub_GSS')
+     /\ TC_GSS'  := h3(TID_GSS'.Pub_GSS'.s_CR)
+     /\ SND({TID_GSS', TC_GSS'}_SecureChannel)
+
+%%%% CS registration
+  4. State = 3 /\ RCV({ID_CS, Pub_CS}_SecureChannel) =|>
      State'     := 4
      /\ Pub_CS' := Pub_CS
      /\ TID_CS' := h2(ID_CS.Pub_CS')
      /\ TC_CS'  := h3(TID_CS'.Pub_CS'.s_CR)
      /\ SND({TID_CS', TC_CS'}_SecureChannel)
 
-% --- 4) Associação GSS–CS,
+
+%%% Associação GSS–CS,
   5. State = 4 =|>
      State'      := 5
      /\ RTS_GSS' := new()
@@ -208,6 +216,7 @@ goal
 end goal
 
 environment()
+
 
 
 
