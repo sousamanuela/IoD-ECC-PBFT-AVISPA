@@ -123,36 +123,34 @@ def=
 local State: nat,
       ID_GSS, TID_GSS, TC_GSS, Pub_GSS, s_GSS: text,
       TID_RD, Pub_RD, X_RD, Sig_RD, t_RD, n_RD: text,
-      X_GSS: text,
-      SessKey: text
+      X_GSS, : text,
+      SessKey_RD_GSS: text
 init
   State := 0
 transition
 
   % --- 0) system start
-  1. State = 0 /\ RCV({start}) =|>
-     State' := 1
-     /\ ID_GSS' := new()
-     /\ SND({ID_GSS'}_SecureChannel)
+  1. State = 0 /\ RCV(start) =|>
+     State'  := 1
+     /\ ID_RD' := new()
+     /\ s_RD'  := new()
+     /\ Pub_RD' := h1(s_RD')          % abstração de Pub_RD = s_RD * P
+     /\ SND({ID_RD', Pub_RD'}_SecureChannel)
 
   % --- 1) receive its own reg from CR
-  2. State = 1 /\ RCV({TID_GSS, TC_GSS, Pub_GSS, s_GSS}_SecureChannel) =|>
+  2. State = 1 /\ RCV({a_RD, TID_RD, TC_RD}_SecureChannel) =|>
      State' := 2
-     % request authentication from RD
-     /\ SND(GSS, RD, auth_request)
 
   % --- 2) receive RD auth material over DY
-  3. State = 2 /\ RCV(RD, TID_RD, Pub_RD, X_RD, Sig_RD, t_RD, n_RD) =|>
+ 3. State = 2 /\ RCV(GSS, auth_request) =|>
      State' := 3
-     % verify RD's Schnorr-style signature
-     /\ if (Sig_RD = h2(TID_RD.Pub_RD.t_RD.n_RD.s_GSS)) then
-           % derive own contribution
-           X_GSS' := h3(TID_GSS.t_RD.n_RD)
-           /\ SessKey' := h4(TID_RD.TID_GSS.X_RD.X_GSS'.t_RD.n_RD)
-           /\ SND(GSS, RD, {SessKey', h3(SessKey'.TID_GSS)}_SecureChannel)
-        else
-           SND(GSS, RD, error)
-        end if
+     /\ t_RD' := new()
+     /\ n_RD' := new()
+     /\ X_RD' := h1(TID_RD.t_RD'.n_RD')
+     % Schnorr-style signature abstrata:
+     % Sig_RD = h2(TID_RD || Pub_RD || t_RD || n_RD || s_RD)
+     /\ Sig_RD' := h2(TID_RD.Pub_RD.t_RD'.n_RD'.s_RD)
+     /\ SND(RD, GSS, TID_RD, Pub_RD, X_RD', Sig_RD', t_RD', n_RD')
 
   % --- 3) receive key confirmation (encrypted with SK)
   4. State = 3 /\ RCV(RD, {h4(SessKey)}_SessKey) =|>
@@ -216,6 +214,7 @@ goal
 end goal
 
 environment()
+
 
 
 
