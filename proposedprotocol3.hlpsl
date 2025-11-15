@@ -127,7 +127,7 @@ played_by GSS
 def=
 local State: nat,
       ID_GSS, TID_GSS, TC_GSS, Pub_GSS, s_GSS: text,
-      TID_RD, Pub_RD, X_RD, Sig_RD, t_RD, n_RD: text,
+      ID_RD, TID_RD, Pub_RD, X_RD, Sig_RD, t_RD,a_RD, n_RD, RTS_RD: text,
       X_GSS, : text,
       SessKey_RD_GSS: text
 init
@@ -135,32 +135,52 @@ init
 transition
 
   % --- 0) system start
+ % --- 0) system start: GSS inicializa e registra-se no CR
   1. State = 0 /\ RCV(start) =|>
-     State'  := 1
-     /\ ID_RD' := new()
-     /\ s_RD'  := new()
-     /\ Pub_RD' := h1(s_RD')          % abstração de Pub_RD = s_RD * P
-     /\ SND({ID_RD', Pub_RD'}_SecureChannel)
+     State'     := 1
+     /\ ID_GSS' := new()
+     /\ s_GSS'  := new()
+     /\ Pub_GSS' := h1(s_GSS')          % abstração de Pub_GSS = s_GSS * P
+     /\ SND({ID_GSS', Pub_GSS'}_SecureChannel)
 
-  % --- 1) receive its own reg from CR
-  2. State = 1 /\ RCV({a_RD, TID_RD, TC_RD}_SecureChannel) =|>
+  % --- 1) recebe {TID_GSS, TC_GSS} do CR (registro do GSS)
+  2. State = 1 /\ RCV({TID_GSS, TC_GSS}_SecureChannel) =|>
      State' := 2
+     % TID_GSS e TC_GSS ficam armazenados localmente
 
-  % --- 2) receive RD auth material over DY
- 3. State = 2 /\ RCV(GSS, auth_request) =|>
-     State' := 3
-     /\ t_RD' := new()
-     /\ n_RD' := new()
-     /\ X_RD' := h1(TID_RD.t_RD'.n_RD')
-     % Schnorr-style signature abstrata:
-     % Sig_RD = h2(TID_RD || Pub_RD || t_RD || n_RD || s_RD)
-     /\ Sig_RD' := h2(TID_RD.Pub_RD.t_RD'.n_RD'.s_RD)
-     /\ SND(RD, GSS, TID_RD, Pub_RD, X_RD', Sig_RD', t_RD', n_RD')
+  % --- 2) Registro do RD: RD -> GSS : {ID_RD, Pub_RD}_SecureChannel
+  3. State = 2 /\ RCV({ID_RD, Pub_RD}_SecureChannel) =|>
+     State'      := 3
+     /\ a_RD'    := new()
+     /\ n_RD_reg' := new()
+     /\ TID_RD'  := h2(ID_RD.a_RD')          % abstração de TID_RD = h(ID_RD || a_RD·P)
+     /\ TC_RD'   := h3(TID_RD'.Pub_RD.n_RD_reg')
+     /\ RTS_RD'  := new()
+     % Envia para RD os dados de registro
+     /\ SND({a_RD', TID_RD', TC_RD'}_SecureChannel)
+     % Envia para CR os dados de registro do RD
+     /\ SND({TID_RD', RTS_RD'}_SecureChannel)
 
-  % --- 3) receive key confirmation (encrypted with SK)
-  4. State = 3 /\ RCV(RD, {h4(SessKey)}_SessKey) =|>
+  % --- 3) Início da autenticação: GSS envia pedido para RD
+  4. State = 3 =|>
      State' := 4
-     /\ witness(GSS, RD, gss_rd_auth, SessKey)
+     /\ SND(GSS, auth_request)
+
+  % --- 4) Recebe material de autenticação do RD sobre o canal DY:
+  % RD -> GSS : (RD, GSS, TID_RD, Pub_RD, X_RD, Sig_RD, t_RD, n_RD)
+  5. State = 4 /\
+     RCV(RD, GSS, TID_RD, Pub_RD, X_RD, Sig_RD, t_RD, n_RD) =|>
+     State' := 5
+     % Aqui GSS deveria verificar Sig_RD (abstrato no modelo)
+     % Deriva a chave de sessão (forma simbólica)
+     /\ SessKey_RD_GSS' := h4(TID_RD.Pub_RD.t_RD.n_RD.TID_GSS)
+     /\ Sig_RD_GSS'     := h3(TID_GSS.Pub_GSS.SessKey_RD_GSS'.s_GSS)
+     /\ SND(GSS, {SessKey_RD_GSS', Sig_RD_GSS'}_SecureChannel)
+
+  % --- 5) Recebe confirmação de chave: RD -> GSS : {h4(SessKey)}_SessKey
+  6. State = 5 /\ RCV(RD, GSS, {h4(SessKey_RD_GSS)}_SessKey_RD_GSS) =|>
+     State' := 6
+     /\ witness(GSS, RD, gss_rd_auth, SessKey_RD_GSS)
 
 end role
 
@@ -176,29 +196,44 @@ def=
 local State: nat,
       ID_CS: text
 init
-  State := 0
-transition
-
+% --- 0) system start: CS inicializa e envia {ID_CS, Pub_CS} para o CR
   1. State = 0 /\ RCV(start) =|>
-     State' := 1
+     State'    := 1
      /\ ID_CS' := new()
-     /\ SND({ID_CS'}_SecureChannel)
+     /\ s_CS'  := new()
+     /\ Pub_CS' := h1(s_CS')            % abstração de Pub_CS = s_CS * P
+     /\ SND({ID_CS', Pub_CS'}_SecureChannel)
+
+  % --- 1) recebe dados de registro do CR: {TID_CS, TC_CS}_SecureChannel
+  2. State = 1 /\ RCV({TID_CS, TC_CS}_SecureChannel) =|>
+     State'  := 2
+     % TID_CS e TC_CS ficam armazenados localmente (memória protegida)
+
+  % --- 2) recebe a transação associada TXC do CR: {TXC}_SecureChannel
+  % (abstração de T_(XC_k) assinado, com K_GSS_CS e RTS_CS)
+  3. State = 2 /\ RCV({TXC}_SecureChannel) =|>
+     State' := 3
+     /\ TXC' := TXC
+     % Aqui poderíamos, se quisesse, modelar participação no PBFT,
+     % mas mantemos abstrato para não complicar o modelo.
+
 
 end role
-
 
 %%%%%% Session: compõe todos os papéis %%%%%%
 
 role session()
 def=
-local CR, RD, GSS, CS: agent,
-      SecureChannel: symmetric_key,
-      h1, h2, h3, h4: hash_func
+local 
+  CR, RD, GSS, CS : agent,
+  SecureChannel   : symmetric_key,
+  h1, h2, h3, h4  : hash_func,
+  SND, RCV        : channel(dy)
 composition
-  control_room(CR, RD, GSS, CS, SecureChannel, h1, h2, h3, h4)
-  /\ remote_drone(RD, CR, GSS, SecureChannel, h1, h2, h3, h4)
-  /\ ground_station(GSS, CR, RD, CS, SecureChannel, h1, h2, h3, h4)
-  /\ cloud_server(CS, GSS, SecureChannel, h1, h2, h3, h4)
+  control_room(CR, RD, GSS, CS, SecureChannel, h1, h2, h3, h4, SND, RCV)
+  /\ remote_drone(RD, CR, GSS, SecureChannel, h1, h2, h3, h4, SND, RCV)
+  /\ ground_station(GSS, CR, RD, CS, SecureChannel, h1, h2, h3, h4, SND, RCV)
+  /\ cloud_server(CS, CR, GSS, SecureChannel, h1, h2, h3, h4, SND, RCV)
 end role
 
 
@@ -206,19 +241,27 @@ end role
 
 role environment()
 def=
-const CR, RD, GSS, CS: agent,
-      SecureChannel: symmetric_key,
-      h1, h2, h3, h4: hash_func
+const 
+  CR, RD, GSS, CS : agent,
+  i               : agent,
+  SecureChannel   : symmetric_key,
+  h1, h2, h3, h4  : hash_func,
+  sk_rg           : protocol_id,     % id para o sigilo da sessão
+  gss_rd_auth     : protocol_id      % id para autenticação GSS<-RD
+intruder_knowledge = {i}
 composition
   session()
 end role
-%%%%%% Autenticacao e chave de sessao %%%%%%
+
+%%%%%% Autenticação e chave de sessão %%%%%%
 goal
-  secrecy_of SessKey
+  secrecy_of sk_rg
   authentication_on gss_rd_auth
 end goal
 
 environment()
+
+
 
 
 
