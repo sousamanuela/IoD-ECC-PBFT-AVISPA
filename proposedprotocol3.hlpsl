@@ -1,0 +1,266 @@
+% =========================================================
+% IoD-ECC-PBFT
+% Schnorr-style ECC signatures
+% RD <-> GSS + SK
+% =========================================================
+
+%%%%%% Control_room (CR) %%%%%%
+
+role control_room(CR, RD, GSS, CS: agent,
+                  SecureChannel: symmetric_key,
+                  h1, h2, h3, h4: hash_func,
+                  SND, RCV: channel(dy))
+played_by CR
+def=
+local State    : nat,
+      s_CR     : text,
+      ID_GSS Pub_GSS, TID_GSS, TC_GSS, RTS_GSS  : text,
+      ID_CS, Pub_CS, TID_CS, RTS_CS, TC_CS      : text,
+      TID_RD, RTS_RD  : text,
+      K_GSS_CS, TXG, TXC         : text
+init
+  State := 0
+
+transition
+
+  % --- Inicialização: CR escolhe s_CR e publica parâmetros globais
+  1. State = 0 /\ RCV(start) =|>
+     State' := 1
+     /\ s_CR' := new()
+     /\ SND({h1, h2, h3, h4}_SecureChannel)
+
+  % --- RD: GSS -> CR : {TID_RD, RTS_RD}_SecureChannel
+  2. State = 1 /\ RCV({TID_RD, RTS_RD}_SecureChannel) =|>
+     State'    := 2
+     /\ TID_RD' := TID_RD
+     /\ RTS_RD' := RTS_RD
+
+  % --- GSS: GSS -> CR : {ID_GSS, Pub_GSS}_SecureChannel
+  3. State = 2 /\ RCV({ID_GSS, Pub_GSS}_SecureChannel) =|>
+     State'      := 3
+     /\ Pub_GSS' := Pub_GSS
+     /\ TID_GSS' := h2(ID_GSS.Pub_GSS')
+     /\ TC_GSS'  := h3(TID_GSS'.Pub_GSS'.s_CR)
+     /\ SND({TID_GSS', TC_GSS'}_SecureChannel)
+
+  % --- CS: CS -> CR : {ID_CS, Pub_CS}_SecureChannel
+  4. State = 3 /\ RCV({ID_CS, Pub_CS}_SecureChannel) =|>
+     State'      := 4
+     /\ Pub_CS'  := Pub_CS
+     /\ TID_CS'  := h2(ID_CS.Pub_CS')
+     /\ TC_CS'   := h3(TID_CS'.Pub_CS'.s_CR)
+     /\ SND({TID_CS', TC_CS'}_SecureChannel)
+
+  % --- Associação GSS–CS
+  5. State = 4 =|>
+     State'       := 5
+     /\ RTS_GSS'  := new()
+     /\ RTS_CS'   := new()
+     /\ K_GSS_CS' := h4(TID_GSS.Pub_GSS.TID_CS.Pub_CS.s_CR)
+     /\ TXG'      := h1(TID_GSS.K_GSS_CS'.RTS_GSS')
+     /\ TXC'      := h1(TID_CS.K_GSS_CS'.RTS_CS')
+     /\ SND({TXG'}_SecureChannel)   % para GSS
+     /\ SND({TXC'}_SecureChannel)   % para CS
+
+end role
+
+
+%%%%%% Remote drone (RD) %%%%%%
+
+role remote_drone(RD, CR, GSS: agent,
+                  SecureChannel: symmetric_key,
+                  h1, h2, h3, h4: hash_func,
+                  SND, RCV: channel(dy))
+played_by RD
+def=
+local State            : nat,
+      ID_RD, TID_RD, TC_RD, Pub_RD  : text,
+      s_RD, a_RD, t_RD, n_RD       : text,
+      X_RD, Sig_RD     : text,
+      SessKey_RD_GSS, Sig_RD_GSS    : text
+
+init
+  State := 0
+
+transition
+
+  % --- Registro RD: gera ID_RD, s_RD, Pub_RD e envia para GSS
+  1. State = 0 /\ RCV(start) =|>
+     State'   := 1
+     /\ ID_RD' := new()
+     /\ s_RD'  := new()
+     /\ Pub_RD' := h1(s_RD')         
+    /\ SND({ID_RD', Pub_RD'}_SecureChannel)
+
+  % --- Recebe dados de registro do GSS: {a_RD, TID_RD, TC_RD}
+  2. State = 1 /\ RCV({a_RD, TID_RD, TC_RD}_SecureChannel) =|>
+     State' := 2
+
+  % --- Espera pedido de autenticação do GSS
+  3. State = 2 /\ RCV(GSS, auth_request) =|>
+     State' := 3
+     /\ t_RD' := new()
+     /\ n_RD' := new()
+     /\ X_RD' := h1(TID_RD.t_RD'.n_RD')
+     /\ Sig_RD' := h2(TID_RD.Pub_RD.t_RD'.n_RD'.s_RD)
+     /\ SND(RD, GSS, TID_RD, Pub_RD, X_RD', Sig_RD', t_RD', n_RD')
+
+  % --- Recebe SK e assinatura do GSS sobre SK em canal seguro admin
+  4. State = 3 /\ RCV(GSS, {SessKey_RD_GSS, Sig_RD_GSS}_SecureChannel) =|>
+     State' := 4
+     /\ SessKey_RD_GSS' := SessKey_RD_GSS
+     % Confirmação de chave sem revelar SK
+     /\ SND(RD, GSS, {h4(SessKey_RD_GSS')}_(SessKey_RD_GSS'))
+     /\ request(RD, GSS, gss_rd_auth, SessKey_RD_GSS')
+     /\ secret(SessKey_RD_GSS', sk_rg, {RD, GSS})
+
+end role
+
+
+%%%%%% Ground Station Server (GSS) %%%%%%
+
+role ground_station(GSS, CR, RD, CS: agent,
+                    SecureChannel: symmetric_key,
+                    h1, h2, h3, h4: hash_func,
+                    SND, RCV: channel(dy))
+played_by GSS
+def=
+local State               : nat,
+      ID_GSS, TID_GSS     : text,
+      TC_GSS, Pub_GSS     : text,
+      s_GSS               : text,
+
+      ID_RD, TID_RD       : text,
+      Pub_RD, TC_RD       : text,
+      a_RD, n_RD_reg      : text,
+      RTS_RD              : text,
+
+      X_RD, Sig_RD        : text,
+      t_RD, n_RD          : text,
+      SessKey_RD_GSS      : text,
+      Sig_RD_GSS          : text
+
+init
+  State := 0
+
+transition
+
+  % --- GSS inicializa e registra-se no CR
+  1. State = 0 /\ RCV(start) =|>
+     State'      := 1
+     /\ ID_GSS'  := new()
+     /\ s_GSS'   := new()
+     /\ Pub_GSS' := h1(s_GSS')      % abstração de Pub_GSS = s_GSS * P
+     /\ SND({ID_GSS', Pub_GSS'}_SecureChannel)
+
+  % --- recebe {TID_GSS, TC_GSS} do CR (registro do GSS)
+  2. State = 1 /\ RCV({TID_GSS, TC_GSS}_SecureChannel) =|>
+     State' := 2
+
+  % ---  Registro do RD: RD -> GSS : {ID_RD, Pub_RD}_SecureChannel
+  3. State = 2 /\ RCV({ID_RD, Pub_RD}_SecureChannel) =|>
+     State'       := 3
+     /\ a_RD'     := new()
+     /\ n_RD_reg' := new()
+     /\ TID_RD'   := h2(ID_RD.a_RD')          % abstração de h(ID_RD || a_RD.P)
+     /\ TC_RD'    := h3(TID_RD'.Pub_RD.n_RD_reg')
+     /\ RTS_RD'   := new()
+     /\ SND({a_RD', TID_RD', TC_RD'}_SecureChannel)   % para RD
+     /\ SND({TID_RD', RTS_RD'}_SecureChannel)         % para CR
+
+ 
+  4. State = 3 =|>
+     State' := 4
+     /\ SND(GSS, auth_request)
+ 
+  5. State = 4 /\
+     RCV(RD, GSS, TID_RD, Pub_RD, X_RD, Sig_RD, t_RD, n_RD) =|>
+     State' := 5
+     % Verificação de Sig_RD é abstrata
+     /\ SessKey_RD_GSS' := h4(TID_RD.Pub_RD.t_RD.n_RD.TID_GSS)
+     /\ Sig_RD_GSS'     := h3(TID_GSS.Pub_GSS.SessKey_RD_GSS'.s_GSS)
+     /\ SND(GSS, {SessKey_RD_GSS', Sig_RD_GSS'}_SecureChannel)
+     /\ witness(GSS, RD, gss_rd_auth, SessKey_RD_GSS')
+
+  6. State = 5 /\ RCV(RD, GSS, {h4(SessKey_RD_GSS)}_SessKey_RD_GSS) =|>
+     State' := 6
+
+end role
+
+
+%%%%%% Cloud Server (CS) %%%%%%
+
+role cloud_server(CS, CR, GSS: agent,
+                  SecureChannel: symmetric_key,
+                  h1, h2, h3, h4: hash_func,
+                  SND, RCV: channel(dy))
+played_by CS
+def=
+local State          : nat,
+      ID_CS          : text,
+      s_CS, Pub_CS   : text,
+      TID_CS, TC_CS  : text,
+      TXC            : text
+
+init
+  State := 0
+
+transition
+
+  % ---  CS inicializa e envia {ID_CS, Pub_CS} para o CR
+  1. State = 0 /\ RCV(start) =|>
+     State'    := 1
+     /\ ID_CS' := new()
+     /\ s_CS'  := new()
+     /\ Pub_CS' := h1(s_CS')           
+     /\ SND({ID_CS', Pub_CS'}_SecureChannel)
+
+  2. State = 1 /\ RCV({TID_CS, TC_CS}_SecureChannel) =|>
+     State' := 2
+
+   3. State = 2 /\ RCV({TXC}_SecureChannel) =|>
+     State' := 3
+     /\ TXC' := TXC
+
+end role
+
+
+%%%%%% Session: compõe todos os papéis %%%%%%
+
+role session()
+def=
+local 
+  CR, RD, GSS, CS : agent,
+  SecureChannel   : symmetric_key,
+  h1, h2, h3, h4  : hash_func,
+  SND, RCV        : channel(dy)
+composition
+  control_room(CR, RD, GSS, CS, SecureChannel, h1, h2, h3, h4, SND, RCV)
+  /\ remote_drone(RD, CR, GSS, SecureChannel, h1, h2, h3, h4, SND, RCV)
+  /\ ground_station(GSS, CR, RD, CS, SecureChannel, h1, h2, h3, h4, SND, RCV)
+  /\ cloud_server(CS, CR, GSS, SecureChannel, h1, h2, h3, h4, SND, RCV)
+end role
+
+
+%%%%%% Environment + goals %%%%%%
+
+role environment()
+def=
+const 
+  CR, RD, GSS, CS : agent,
+  i               : agent,
+  SecureChannel   : symmetric_key,
+  h1, h2, h3, h4  : hash_func,
+  sk_rg           : protocol_id,    % sigilo da SK RD-GSS
+  gss_rd_auth     : protocol_id     % autenticação GSS<-RD
+intruder_knowledge = {i}
+composition
+  session()
+end role
+
+goal
+  secrecy_of sk_rg
+  authentication_on gss_rd_auth
+end goal
+
+environment()
