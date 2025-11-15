@@ -4,7 +4,7 @@ Schnorr-style ECC signatures
 RD<->GSS + SK  
 % =========================================================
 
-%%%%%% Control_room (RD) %%%%%%
+%%%%%% Control_room (CR) %%%%%%
 
 role control_room(CR, RD, GSS, CS: agent,
                   SecureChannel: symmetric_key,
@@ -82,31 +82,36 @@ init
   State := 0
 transition
 
-  % --- 0) get system params
+  % --- 0) Registro RD
+  %    Envia {ID_RD, Pub_RD} para o GSS para registro.
   1. State = 0 /\ RCV(start) =|>
-     State' := 1
+     State'  := 1
      /\ ID_RD' := new()
-     /\ SND({ID_RD'}_SecureChannel)
+     /\ s_RD'  := new()
+     /\ Pub_RD' := h1(s_RD')          % abstração de Pub_RD = s_RD * P
+     /\ SND({ID_RD', Pub_RD'}_SecureChannel)
 
   % --- 1) receive reg data from CR
-  2. State = 1 /\ RCV({TID_RD, TC_RD, Pub_RD, s_RD}_SecureChannel) =|>
+    2. State = 1 /\ RCV({a_RD, TID_RD, TC_RD}_SecureChannel) =|>
      State' := 2
+     % RD apenas armazena a_RD, TID_RD e TC_RD para uso futuro.
 
-  % --- 2) wait for auth request from GSS
+  % --- 2) Espera pedido de autenticação do GSS
   3. State = 2 /\ RCV(GSS, auth_request) =|>
      State' := 3
      /\ t_RD' := new()
      /\ n_RD' := new()
      /\ X_RD' := h1(TID_RD.t_RD'.n_RD')
-     % Schnorr-style signature: Sig = h(m || Pub) * sk  (+ nonce part)
+     % Schnorr-style signature abstrata:
+     % Sig_RD = h2(TID_RD || Pub_RD || t_RD || n_RD || s_RD)
      /\ Sig_RD' := h2(TID_RD.Pub_RD.t_RD'.n_RD'.s_RD)
      /\ SND(RD, GSS, TID_RD, Pub_RD, X_RD', Sig_RD', t_RD', n_RD')
 
-  % --- 3) receive SK and sig from GSS over secure admin channel
+  % --- 3) Recebe SK e assinatura do GSS sobre SK em canal seguro admin
   4. State = 3 /\ RCV(GSS, {SessKey_RD_GSS', Sig_RD_GSS'}_SecureChannel) =|>
      State' := 4
      /\ SessKey_RD_GSS' := SessKey_RD_GSS'
-     % send key confirmation WITHOUT leaking SK
+     % Envia confirmação de chave sem revelar SK
      /\ SND(RD, GSS, {h4(SessKey_RD_GSS')}_(SessKey_RD_GSS'))
 
 end role
@@ -214,6 +219,7 @@ goal
 end goal
 
 environment()
+
 
 
 
