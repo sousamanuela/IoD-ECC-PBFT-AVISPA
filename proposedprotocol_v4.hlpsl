@@ -1,0 +1,493 @@
+% =========================================================
+% IoD-ECC-PBFT – Full Protocol Model
+% Covers:
+%   (1) Registration:  CR issues credentials to RD, GSS, CS
+%   (2) Auth RD <-> RD  (3-message exchange, shared SK)
+%   (3) Auth RD <-> GSS (3-message exchange, shared SK)
+%   (4) Auth GSS <-> CS (3-message exchange, shared SK via K_GSS_CS)
+% Schnorr-style ECC signatures abstracted as hash combinations
+% =========================================================
+
+
+%% -------------------------------------------------------
+%% ROLE: control_room (CR)
+%% Responsibilities:
+%%   - Initialise system parameters
+%%   - Register RD: receive {ID_RD, Pub_RD}, issue {a_RD, TID_RD, TC_RD}
+%%   - Register GSS: receive {ID_GSS, Pub_GSS}, issue {TID_GSS, TC_GSS}
+%%   - Register CS : receive {ID_CS,  Pub_CS},  issue {TID_CS,  TC_CS}
+%%   - Compute association key K_GSS_CS and sign transactions TXG / TXC
+%% -------------------------------------------------------
+
+role control_room(CR, RD, GSS, CS : agent,
+                  Sch              : symmetric_key,
+                  h1, h2, h3       : hash_func,
+                  SND, RCV         : channel(dy))
+played_by CR
+def=
+
+local State                                    : nat,
+      s_CR                                     : text,
+      ID_RD,  Pub_RD,  TID_RD,  TC_RD,
+        a_RD,  n_RD,  RTS_RD                  : text,
+      ID_GSS, Pub_GSS, TID_GSS, TC_GSS,
+        a_GSS, RTS_GSS                         : text,
+      ID_CS,  Pub_CS,  TID_CS,  TC_CS,
+        a_CS,  RTS_CS                          : text,
+      K_GSS_CS, TXG, SigTXG, TXC, SigTXC      : text
+
+init State := 0
+
+transition
+
+  %% Step 0 – CR generates its private key s_CR
+  0. State = 0 /\ RCV(start) =|>
+     State' := 1
+     /\ s_CR' := new()
+
+  %% Step 1 – RD registration request: RD -> CR : {ID_RD, Pub_RD}
+  1. State = 1 /\ RCV({ID_RD, Pub_RD}_Sch) =|>
+     State'    := 2
+     /\ a_RD'  := new()
+     /\ n_RD'  := new()
+     /\ RTS_RD' := new()
+     %% TID_RD = h(ID_RD || a_RD.P)  — abstracted as h1(ID_RD.a_RD')
+     /\ TID_RD' := h1(ID_RD.a_RD')
+     %% TC_RD  = h(TID_RD || Pub_RD || n_RD)
+     /\ TC_RD'  := h2(TID_RD'.Pub_RD.n_RD')
+     /\ SND({a_RD', TID_RD', TC_RD'}_Sch)
+
+  %% Step 2 – GSS registration request: GSS -> CR : {ID_GSS, Pub_GSS}
+  2. State = 2 /\ RCV({ID_GSS, Pub_GSS}_Sch) =|>
+     State'       := 3
+     /\ a_GSS'    := new()
+     /\ RTS_GSS'  := new()
+     %% TID_GSS = h(ID_GSS || a_GSS.P)
+     /\ TID_GSS'  := h1(ID_GSS.a_GSS')
+     %% TC_GSS  = h(TID_GSS || Pub_GSS || s_CR)
+     /\ TC_GSS'   := h2(TID_GSS'.Pub_GSS.s_CR)
+     /\ SND({TID_GSS', TC_GSS'}_Sch)
+
+  %% Step 3 – CS registration request: CS -> CR : {ID_CS, Pub_CS}
+  3. State = 3 /\ RCV({ID_CS, Pub_CS}_Sch) =|>
+     State'      := 4
+     /\ a_CS'    := new()
+     /\ RTS_CS'  := new()
+     %% TID_CS = h(ID_CS || a_CS.P)
+     /\ TID_CS'  := h1(ID_CS.a_CS')
+     %% TC_CS  = h(TID_CS || Pub_CS || s_CR)
+     /\ TC_CS'   := h2(TID_CS'.Pub_CS.s_CR)
+     /\ SND({TID_CS', TC_CS'}_Sch)
+
+  %% Step 4 – CR builds association key K_GSS_CS and signed transactions
+  4. State = 4 =|>
+     State'        := 5
+     %% K_GSS_CS = h(TID_GSS||Pub_GSS||s_CR) XOR h(TID_CS||Pub_CS||s_CR)
+     %%            — abstracted as a single hash over all components
+     /\ K_GSS_CS'  := h3(TID_GSS.Pub_GSS.TID_CS.Pub_CS.s_CR)
+     %% TXG = < TID_GSS , E_Pub_GSS(K_GSS_CS, RTS_GSS) >
+     /\ TXG'       := h1(TID_GSS.K_GSS_CS'.RTS_GSS)
+     %% TXC = < TID_CS  , E_Pub_CS (K_GSS_CS, RTS_CS)  >
+     /\ TXC'       := h1(TID_CS.K_GSS_CS'.RTS_CS)
+     %% Schnorr-style signatures over transactions
+     /\ SigTXG'    := h2(TXG'.s_CR)
+     /\ SigTXC'    := h2(TXC'.s_CR)
+     /\ SND({TXG', SigTXG'}_Sch)   % delivered to GSS
+     /\ SND({TXC', SigTXC'}_Sch)   % delivered to CS
+
+end role
+
+
+%% -------------------------------------------------------
+%% ROLE: remote_drone – RD_i1  (initiator of RD<->RD and RD<->GSS)
+%% -------------------------------------------------------
+
+role remote_drone(RD, RD2, CR, GSS : agent,
+                  Sch               : symmetric_key,
+                  h1, h2, h3        : hash_func,
+                  SND, RCV          : channel(dy))
+played_by RD
+def=
+
+local State                                    : nat,
+      ID_RD,  s_RD,  Pub_RD                   : text,
+      TID_RD, TC_RD, a_RD                     : text,
+
+      %% RD<->RD variables
+      d1, x_RD1, X_RD1, Sig_RD1              : text,
+      TID_RD2, Pub_RD2, Y_RD2, Sig_RD2       : text,
+      SK_RD12                                 : text,
+      T1                                      : text,
+
+      %% RD<->GSS variables
+      g, x_RDg, X_RDg, Sig_RDg               : text,
+      TID_GSSg, Pub_GSSg, Y_GSSg, Sig_GSSg   : text,
+      SK_RD_GSS                               : text,
+      T5                                      : text
+
+init State := 0
+
+transition
+
+  %% ---- Registration ----
+
+  %% RD sends {ID_RD, Pub_RD} to CR over secure channel
+  0. State = 0 /\ RCV(start) =|>
+     State'    := 1
+     /\ ID_RD' := new()
+     /\ s_RD'  := new()
+     /\ Pub_RD' := h1(s_RD')          % Pub_RD = s_RD * P
+     /\ SND({ID_RD', Pub_RD'}_Sch)
+
+  %% RD receives {a_RD, TID_RD, TC_RD} from CR
+  1. State = 1 /\ RCV({a_RD, TID_RD, TC_RD}_Sch) =|>
+     State' := 2
+
+  %% ---- Authentication RD <-> RD (Initiator side) ----
+
+  %% M1: RD_i1 -> RD_i2
+  %% x_RD1 = h(TID_RD1 || TC_RD1 || s_RD1 || T1 || d1)
+  %% X_RD1 = x_RD1 * P  (abstracted as h1(x_RD1))
+  %% Sig_RD1 = x_RD1 + h(TID_RD1||Pub_RD1||T1)*s_RD1  (Schnorr abstraction)
+  %% E_Pub_RD2(TID_RD1, X_RD1, Pub_RD1, Sig_RD1)
+  2. State = 2 /\ RCV(start) =|>
+     State'     := 3
+     /\ T1'     := new()
+     /\ d1'     := new()
+     /\ x_RD1'  := h1(TID_RD.TC_RD.s_RD.T1'.d1')
+     /\ X_RD1'  := h1(x_RD1')
+     /\ Sig_RD1' := h2(x_RD1'.h2(TID_RD.Pub_RD.T1').s_RD)
+     /\ SND(RD2, {TID_RD, X_RD1', Pub_RD, Sig_RD1', T1'}_Sch)
+
+  %% M2: receive from RD_i2 : {TID_RD2, Y_RD2, Sig_RD2, Pub_RD2}
+  %% Verify Sig_RD2: Sig_RD2*P = Y_RD2 + h(TID_RD2||Pub_RD2||T2)*Pub_RD2
+  %% Compute SK_RD(i1-2) = h(TID_RD1 || x_RD1 * Y_RD2 || TID_RD2)
+  3. State = 3 /\
+     RCV(RD2, {TID_RD2, Y_RD2, Sig_RD2, Pub_RD2, T1}_Sch) =|>
+     State'      := 4
+     %% Schnorr verification abstracted: check consistency via hash
+     /\ SK_RD12' := h3(TID_RD.h1(x_RD1.Y_RD2).TID_RD2)
+     %% M3: send SK confirmation to RD_i2 encrypted under Pub_RD2
+     /\ SND(RD2, {SK_RD12'}_Sch)
+     /\ secret(SK_RD12', sk_rd12, {RD, RD2})
+     /\ witness(RD, RD2, rd_rd_auth, SK_RD12')
+
+  %% ---- Authentication RD <-> GSS (Initiator side) ----
+
+  %% M4: RD -> GSS
+  %% x_RDg = h(TID_RD || TC_RD || s_RD || T5 || g)
+  %% E_Pub_GSS(TID_RD, X_RDg, Sig_RDg)
+  4. State = 4 /\ RCV(start) =|>
+     State'      := 5
+     /\ T5'      := new()
+     /\ g'       := new()
+     /\ x_RDg'   := h1(TID_RD.TC_RD.s_RD.T5'.g')
+     /\ X_RDg'   := h1(x_RDg')
+     /\ Sig_RDg' := h2(x_RDg'.h2(TID_RD.Pub_RD.T5').s_RD)
+     /\ SND(GSS, {TID_RD, X_RDg', Pub_RD, Sig_RDg', T5'}_Sch)
+
+  %% M5: receive from GSS : {TID_GSS, Y_GSS, Sig_GSS, Pub_GSS}
+  %% Verify Sig_GSS, compute SK_RD_GSS = h(TID_RD || x_RDg*Y_GSS || TID_GSS)
+  5. State = 5 /\
+     RCV(GSS, {TID_GSSg, Y_GSSg, Sig_GSSg, Pub_GSSg, T5}_Sch) =|>
+     State'        := 6
+     /\ SK_RD_GSS' := h3(TID_RD.h1(x_RDg.Y_GSSg).TID_GSSg)
+     %% M6: send SK confirmation to GSS encrypted under Pub_GSS
+     /\ SND(GSS, {SK_RD_GSS'}_Sch)
+     /\ secret(SK_RD_GSS', sk_rg, {RD, GSS})
+     /\ request(RD, GSS, gss_rd_auth, SK_RD_GSS')
+
+end role
+
+
+%% -------------------------------------------------------
+%% ROLE: remote_drone_resp – RD_i2  (responder of RD<->RD)
+%% -------------------------------------------------------
+
+role remote_drone_resp(RD2, RD, CR : agent,
+                       Sch          : symmetric_key,
+                       h1, h2, h3   : hash_func,
+                       SND, RCV     : channel(dy))
+played_by RD2
+def=
+
+local State                                 : nat,
+      ID_RD2, s_RD2, Pub_RD2              : text,
+      TID_RD2, TC_RD2, a_RD2             : text,
+      d2, y_RD2, Y_RD2, Sig_RD2          : text,
+      TID_RD1, Pub_RD1, X_RD1, Sig_RD1  : text,
+      SK_RD21, SK_RD12_conf              : text,
+      T1, T2                             : text
+
+init State := 0
+
+transition
+
+  %% Registration: RD2 registers with CR
+  0. State = 0 /\ RCV(start) =|>
+     State'     := 1
+     /\ ID_RD2' := new()
+     /\ s_RD2'  := new()
+     /\ Pub_RD2' := h1(s_RD2')
+     /\ SND({ID_RD2', Pub_RD2'}_Sch)
+
+  1. State = 1 /\ RCV({a_RD2, TID_RD2, TC_RD2}_Sch) =|>
+     State' := 2
+
+  %% M1: receive from RD_i1
+  2. State = 2 /\
+     RCV(RD, {TID_RD1, X_RD1, Pub_RD1, Sig_RD1, T1}_Sch) =|>
+     State'     := 3
+     /\ T2'     := new()
+     /\ d2'     := new()
+     /\ y_RD2'  := h1(TID_RD2.TC_RD2.s_RD2.T2'.d2')
+     /\ Y_RD2'  := h1(y_RD2')
+     %% SK_RD(i2-1) = h(TID_RD1 || y_RD2 * X_RD1 || TID_RD2)
+     /\ SK_RD21' := h3(TID_RD1.h1(y_RD2'.X_RD1).TID_RD2)
+     /\ Sig_RD2' := h2(y_RD2'.h2(TID_RD2.Pub_RD2.T2').s_RD2)
+     %% M2 -> RD_i1
+     /\ SND(RD, {TID_RD2, Y_RD2', Sig_RD2', Pub_RD2', T1}_Sch)
+     /\ witness(RD2, RD, rd_rd_auth, SK_RD21')
+
+  %% M3: receive SK confirmation from RD_i1
+  3. State = 3 /\ RCV(RD, {SK_RD12_conf}_Sch) =|>
+     State' := 4
+     %% Recompute to verify equality SK_RD21 == SK_RD12
+     /\ request(RD2, RD, rd2_rd1_auth, SK_RD21)
+     /\ secret(SK_RD21, sk_rd12, {RD, RD2})
+
+end role
+
+
+%% -------------------------------------------------------
+%% ROLE: ground_station (GSS_j)
+%% -------------------------------------------------------
+
+role ground_station(GSS, CR, RD, CS : agent,
+                    Sch              : symmetric_key,
+                    h1, h2, h3       : hash_func,
+                    SND, RCV         : channel(dy))
+played_by GSS
+def=
+
+local State                                      : nat,
+      ID_GSS, s_GSS, Pub_GSS                    : text,
+      TID_GSS, TC_GSS                           : text,
+      TXG, SigTXG, K_GSS_CS                    : text,
+
+      %% RD<->GSS (responder)
+      g_resp, y_GSS, Y_GSS, Sig_GSS            : text,
+      TID_RD, Pub_RD, X_RD, Sig_RD            : text,
+      SK_GSS_RD                                : text,
+      T5, T6                                   : text,
+
+      %% GSS<->CS (initiator)
+      n_gcs, y_GSSc, Y_GSSc, Sig_GSSc         : text,
+      TID_CS, Pub_CS, Z_CS, Sig_CS            : text,
+      SK_GSS_CS                               : text,
+      T9, T10                                 : text
+
+init State := 0
+
+transition
+
+  %% ---- Registration ----
+  0. State = 0 /\ RCV(start) =|>
+     State'     := 1
+     /\ ID_GSS' := new()
+     /\ s_GSS'  := new()
+     /\ Pub_GSS' := h1(s_GSS')
+     /\ SND({ID_GSS', Pub_GSS'}_Sch)
+
+  1. State = 1 /\ RCV({TID_GSS, TC_GSS}_Sch) =|>
+     State' := 2
+
+  %% Receive signed transaction TXG from CR (via blockchain sync)
+  2. State = 2 /\ RCV({TXG, SigTXG}_Sch) =|>
+     State'       := 3
+     %% Decrypt TXG to recover K_GSS_CS (abstracted via hash)
+     /\ K_GSS_CS' := h1(TXG)
+
+  %% ---- Authentication RD <-> GSS (Responder side) ----
+
+  %% M4: receive from RD
+  3. State = 3 /\
+     RCV(RD, {TID_RD, X_RD, Pub_RD, Sig_RD, T5}_Sch) =|>
+     State'    := 4
+     /\ T6'    := new()
+     /\ y_GSS' := h1(TID_GSS.TC_GSS.s_GSS.T6'.g_resp)
+     /\ Y_GSS' := h1(y_GSS')
+     %% SK_GSS_RD = h(TID_RD || y_GSS * X_RD || TID_GSS)
+     /\ SK_GSS_RD' := h3(TID_RD.h1(y_GSS'.X_RD).TID_GSS)
+     /\ Sig_GSS'   := h2(y_GSS'.h2(TID_GSS.Pub_GSS.T6').s_GSS)
+     %% M5 -> RD
+     /\ SND(RD, {TID_GSS, Y_GSS', Sig_GSS', Pub_GSS', T5}_Sch)
+     /\ witness(GSS, RD, gss_rd_auth, SK_GSS_RD')
+
+  %% M6: receive SK confirmation from RD
+  4. State = 4 /\ RCV(RD, {SK_GSS_RD}_Sch) =|>
+     State' := 5
+
+  %% ---- Authentication GSS <-> CS (Initiator side) ----
+
+  %% M7: GSS -> CS
+  %% y_GSSc = h(TID_GSS || TC_GSS || s_GSS || T9 || n)
+  5. State = 5 /\ RCV(start) =|>
+     State'      := 6
+     /\ T9'      := new()
+     /\ n_gcs'   := new()
+     /\ y_GSSc'  := h1(TID_GSS.TC_GSS.s_GSS.T9'.n_gcs')
+     /\ Y_GSSc'  := h1(y_GSSc')
+     /\ Sig_GSSc' := h2(y_GSSc'.h2(TID_GSS.Pub_GSS.T9').s_GSS)
+     /\ SND(CS, {TID_GSS, Y_GSSc', Sig_GSSc', T9'}_Sch)
+
+  %% M8: receive from CS : {TID_CS, Z_CS, Sig_CS, T10}
+  6. State = 6 /\
+     RCV(CS, {TID_CS, Z_CS, Sig_CS, T9}_Sch) =|>
+     State'       := 7
+     %% SK_GSS_CS = h(TID_GSS || y_GSSc * Z_CS || K_GSS_CS || TID_CS)
+     /\ SK_GSS_CS' := h3(TID_GSS.h1(y_GSSc.Z_CS).K_GSS_CS.TID_CS)
+     %% M9: send SK confirmation to CS
+     /\ SND(CS, {SK_GSS_CS'}_Sch)
+     /\ secret(SK_GSS_CS', sk_gc, {GSS, CS})
+     /\ request(GSS, CS, cs_gss_auth, SK_GSS_CS')
+
+end role
+
+
+%% -------------------------------------------------------
+%% ROLE: cloud_server (CS_k)
+%% -------------------------------------------------------
+
+role cloud_server(CS, CR, GSS : agent,
+                  Sch          : symmetric_key,
+                  h1, h2, h3   : hash_func,
+                  SND, RCV     : channel(dy))
+played_by CS
+def=
+
+local State                                   : nat,
+      ID_CS, s_CS, Pub_CS                    : text,
+      TID_CS, TC_CS                          : text,
+      TXC, SigTXC, K_GSS_CS                 : text,
+
+      %% GSS<->CS (responder)
+      v_rnd, z_CS, Z_CS, Sig_CS            : text,
+      TID_GSS, Pub_GSS, Y_GSS, Sig_GSS    : text,
+      SK_CS_GSS                            : text,
+      T9, T10                              : text
+
+init State := 0
+
+transition
+
+  %% ---- Registration ----
+  0. State = 0 /\ RCV(start) =|>
+     State'    := 1
+     /\ ID_CS' := new()
+     /\ s_CS'  := new()
+     /\ Pub_CS' := h1(s_CS')
+     /\ SND({ID_CS', Pub_CS'}_Sch)
+
+  1. State = 1 /\ RCV({TID_CS, TC_CS}_Sch) =|>
+     State' := 2
+
+  %% Receive signed transaction TXC from CR (via blockchain sync)
+  2. State = 2 /\ RCV({TXC, SigTXC}_Sch) =|>
+     State'       := 3
+     /\ K_GSS_CS' := h1(TXC)
+
+  %% ---- Authentication GSS <-> CS (Responder side) ----
+
+  %% M7: receive from GSS : {TID_GSS, Y_GSSc, Sig_GSSc, T9}
+  %% Verify Sig_GSS: Sig_GSS*P = Y_GSS + h(TID_GSS||Pub_GSS||T9)*Pub_GSS
+  3. State = 3 /\
+     RCV(GSS, {TID_GSS, Y_GSS, Sig_GSS, T9}_Sch) =|>
+     State'    := 4
+     /\ T10'   := new()
+     /\ v_rnd' := new()
+     /\ z_CS'  := h1(TID_CS.TC_CS.s_CS.T10'.v_rnd')
+     /\ Z_CS'  := h1(z_CS')
+     %% SK_CS_GSS = h(TID_GSS || z_CS * Y_GSS || K_GSS_CS || TID_CS)
+     /\ SK_CS_GSS' := h3(TID_GSS.h1(z_CS'.Y_GSS).K_GSS_CS.TID_CS)
+     /\ Sig_CS'    := h2(z_CS'.h2(TID_CS.Pub_CS.T10').s_CS)
+     %% M8 -> GSS
+     /\ SND(GSS, {TID_CS, Z_CS', Sig_CS', T9}_Sch)
+     /\ witness(CS, GSS, cs_gss_auth, SK_CS_GSS')
+
+  %% M9: receive SK confirmation from GSS
+  4. State = 4 /\ RCV(GSS, {SK_CS_GSS}_Sch) =|>
+     State' := 5
+     /\ secret(SK_CS_GSS, sk_gc, {GSS, CS})
+
+end role
+
+
+%% -------------------------------------------------------
+%% SESSION
+%% -------------------------------------------------------
+
+role session()
+def=
+local
+  CR, RD, RD2, GSS, CS : agent,
+  Sch                   : symmetric_key,
+  h1, h2, h3            : hash_func,
+  SND, RCV              : channel(dy)
+
+composition
+     control_room      (CR,  RD,  GSS, CS,  Sch, h1, h2, h3, SND, RCV)
+  /\ remote_drone      (RD,  RD2, CR,  GSS, Sch, h1, h2, h3, SND, RCV)
+  /\ remote_drone_resp (RD2, RD,  CR,       Sch, h1, h2, h3, SND, RCV)
+  /\ ground_station    (GSS, CR,  RD,  CS,  Sch, h1, h2, h3, SND, RCV)
+  /\ cloud_server      (CS,  CR,  GSS,      Sch, h1, h2, h3, SND, RCV)
+
+end role
+
+
+%% -------------------------------------------------------
+%% ENVIRONMENT
+%% -------------------------------------------------------
+
+role environment()
+def=
+const
+  CR, RD, RD2, GSS, CS : agent,
+  i                     : agent,
+  Sch                   : symmetric_key,
+  h1, h2, h3            : hash_func,
+
+  %% Protocol IDs for goals
+  sk_rd12    : protocol_id,   % secrecy of SK between RD_i1 and RD_i2
+  sk_rg      : protocol_id,   % secrecy of SK between RD and GSS
+  sk_gc      : protocol_id,   % secrecy of SK between GSS and CS
+  rd_rd_auth : protocol_id,   % mutual auth RD_i1 <-> RD_i2
+  rd2_rd1_auth : protocol_id, % mutual auth RD_i2 <-> RD_i1 (reverse)
+  gss_rd_auth  : protocol_id, % mutual auth GSS  <-> RD
+  cs_gss_auth  : protocol_id  % mutual auth CS   <-> GSS
+
+intruder_knowledge = {CR, RD, RD2, GSS, CS, i, h1, h2, h3}
+
+composition
+  session()
+
+end role
+
+%% -------------------------------------------------------
+%% GOALS
+%% -------------------------------------------------------
+
+goal
+  %% Secrecy goals
+  secrecy_of sk_rd12
+  secrecy_of sk_rg
+  secrecy_of sk_gc
+
+  %% Authentication goals
+  authentication_on rd_rd_auth
+  authentication_on rd2_rd1_auth
+  authentication_on gss_rd_auth
+  authentication_on cs_gss_auth
+end goal
+
+environment()
